@@ -1,4 +1,4 @@
-# 1000LowBirthWeight:Classification&Clustering
+# Classification and Clustering of Low Birth Weight Mortality Using Global Health and Economic Data
 
 An R Shiny application for the classification and clustering of low birth weight mortality, using global health and economic data.
 
