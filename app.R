@@ -6,7 +6,7 @@ library(tidyverse)
 library(magrittr)
 library(lime)
 library(fpc)
-
+library(assertive.types)
 # Function to calculate number of rows in ggplot facets
 gg_facet_nrow_ng <- function(p) {
   assertive.types::assert_is_any_of(p, 'ggplot')
