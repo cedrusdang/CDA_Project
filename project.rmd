@@ -1,0 +1,1207 @@
+---
+title: "Classification and Clustering of Low Birth Weight Mortality Using Global Health and Economic Data"
+author: "ID: 24190901 - Name: Cedrus DANG"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    theme: readable
+    toc_depth: 6
+  word_document:
+    toc: true
+    toc_depth: '6'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache=T, cache.rebuild = T, message = F, error = F)
+```
+
+# I. Introduction
+
+The project aims to develop classifications and clustering models for public health research.
+
+-   Classification Goal: The models will classify the **Low Birth Weight** mortality levels of "High" and "Low" using the mean mortality rate. The models use the data set of causes of death and the data of GDP and Population from the World Bank. This cause of death was targeted due to its significant value in aid programs for children's and mothers' health and safety. For the single variable model, GDP per capita will be selected to build a fast classification.
+
+-   Clustering Goal: The models will Clustering the causes of death to groups with similar attributes and find the relationship between them to label their groups.
+
+This analysis focuses on national-level data from multiple countries. Regional, sub-national data and dependent territories are excluded to ensure no unneeded outliers.
+
+Decision Tree and Naive Bayesian modelling techniques will be compared to determine the most effective approach for classification and clustering to identify the best-performing models.
+
+Several methods were used to assess and enhance the classification models' performance. They are 10-fold cross-validation, Recursive Feature Elimination (RFE), confusion matrix, F1 score, and ROC-AUC metric.
+
+Additional method not mentioned in the lectures is Recursive Feature Elimination (RFE).
+
+RFE was applied to Decision Tree and Naive Bayes classification models in several papers (Painuli et al., 2023) (Mladenova et al., 2024). In those papers, the technique did improve the performance of the models. Additionally, the decision tree model showed better performance than the naive Bayes model due to high-dimensional data, which is similar to the findings in this paper, both in data and results.
+
+# II. Data preparation
+
+## 1. Death Causes Data
+
+```{r message=FALSE}
+library(knitr)
+library(kableExtra)
+death_causes <- read.csv("Countries and death causes.csv")
+#Structure of the data
+Structure <- capture.output(str(death_causes))
+kable(as.data.frame(Structure), format = "html") %>% scroll_box(height = "490px")
+```
+
+```{r message=FALSE}
+#Check the dimensions of the "Year" column in a data frame
+cat("Years:", unique(as.character(death_causes$Year)))
+cat("Total years:",length(unique(as.character(death_causes$Year))))
+```
+
+The main data of countries and deaths shows that there are 31 variables with 28 causes of death and 6840 observations from 1990 to 2019 (30 year).
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(DT)
+#Rename column has a typo
+death_causes <- death_causes %>% rename(Alcohol.use = Alochol.use)
+#Change character columns to factors 
+death_causes$Entity <- as.factor(death_causes$Entity)
+death_causes$Code <- as.factor(death_causes$Code)
+death_causes$Year <- as.factor(death_causes$Year)
+#Summary
+kable(summary(death_causes), format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>%
+  column_spec(c(2:32),extra_css = "white-space: nowrap;",border_right = T) %>% 
+  scroll_box(height = "350px")
+```
+
+```{r message=FALSE}
+#Look for missing and NA value
+cat("Observation have NA value:",sum(rowSums(is.na(death_causes)) >= 1))
+cat("Observation have missing value:",sum(rowSums((death_causes == "")) >= 1))
+```
+
+The summary shows that there are 690 empty values in the Code column, and the other variables have no missing values.
+
+```{r message=FALSE}
+#Filtering entity that have missing values
+missing_rows <- death_causes[unique(which(rowSums(death_causes == "") > 0)),]
+(as.character(unique(missing_rows$Entity)))
+```
+
+The entities that have missing codes are not nations but regions, groups of nations and dependent states. Its figures have already been presented in other nations. Therefore, we will exclude them from the analysis even if this will reduce the observation from 6840 to 6150 (10%).
+
+```{r message=FALSE}
+#Remove rows with missing values
+death_causes <- death_causes[-unique(which(rowSums(death_causes == "") > 0)),]
+```
+
+```{r}
+# Create an all causes column that sums all the deaths
+death_causes$Allcauses <- rowSums(death_causes[sapply(death_causes, is.numeric)], na.rm = TRUE)
+#Check for outliers that is not nations
+death_causes_2019 <- death_causes[death_causes$Year == 2019, c("Entity", "Year", "Allcauses")]
+tail(death_causes_2019[order(death_causes_2019$Allcauses), ], 10)
+```
+
+In the data, there are entity name World, which is also not a nation. We will exclude it from the data set.
+
+```{r}
+#Remove World observation
+death_causes <- death_causes[death_causes$Entity != "World", ]
+```
+
+```{r}
+#Summary
+kable(summary(death_causes), format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>%
+  column_spec(c(2:33),extra_css = "white-space: nowrap;",border_right = T) %>% 
+  scroll_box(height = "350px")
+```
+
+In the cleared data set's summary, as all the mean is larger than 3rd quartiles and the differences between Min to Mean and Mean to Max are significant, we can conclude that all causes may have very skewed distributions, and we will investigate deeper on that later. We will calculate the total of all causes , look for the top 5 entities for any unreasonable outliers and pick a part of the data set in the year 2019 to analyse using histograms to check this conclusion.
+
+Now the data is clear, we will plot two the histograms with one using log scale to work with the high outliers
+
+```{r}
+#Histograms of 
+par(mfrow = c(1, 2))
+
+# Histogram of the total deaths in 2019
+hist(death_causes[death_causes$Year == 2019, "Allcauses"], 
+     breaks = 51, 
+     main = "Histogram: All Causes in 2019", 
+     xlab = "Total Deaths", 
+     col = "lightblue", border = "black")
+abline(v = mean(death_causes[death_causes$Year == 2019, "Allcauses"], na.rm = TRUE), col = "red", lwd = 2, lty = 2)
+
+# Histogram with log-scaled of the total deaths in 2019
+log_allcauses <- log10(death_causes[death_causes$Year == 2019, "Allcauses"] + 1)
+hist(log_allcauses, 
+     main = "Log Scaled Histogram", 
+     xlab = "Log10 of Total Deaths", 
+     col = "blue", border = "black", breaks = 41)
+abline(v = mean(log_allcauses, na.rm = TRUE), col = "red", lwd = 2, lty = 2)  
+```
+
+The first plot shows a notable number of outliers highly influence the distribution of total deaths. However, the distribution becomes much more balanced after applying a log transformation. This indicate that a much more balance distribution can be obtain with the exclude of extreme values or normalization . The natural outliers are countries with a too-large or too-small population; eliminating them from the data set is unreasonable. Instead, a normalization by dividing the number of deaths by population can improve the situation.
+
+Therefore, we now combine the data with world's population and GDP from World Bank.
+
+## 2. Population Data
+
+```{r message=FALSE, warning=FALSE}
+library(tidyr)
+population <- read.csv("population.csv", skip = 4)
+
+#Change to pivot table
+population <- population %>% pivot_longer(
+    cols = starts_with("X"), 
+    names_to = "Year", 
+    names_prefix = "X", 
+    values_to = "Population"
+  )
+
+population$Year <- as.factor(population$Year)
+population$Country.Code <- as.factor(population$Country.Code)
+population <- as.data.frame(population)
+
+#Checking rows in the main data that different from population data
+unmatched_codes <- setdiff(death_causes$Code, population$Country.Code)
+unmatched_rows <- death_causes %>% filter(Code %in% unmatched_codes)
+
+cat("Missing value entity:", as.character(unique(unmatched_rows$Entity)))
+cat("Number of rows:", nrow(unmatched_rows))
+```
+
+Some entities do not have data in the population data set. Those are small states except Taiwan, and only 120 of the 6120 observations(about 2%). Our analysis will be sensitive to the population due to the normalization process. Therefore, we will exclude them from our data as they also do not significantly impact our models. However, an extended analysis with Taiwan may be conducted in the future when there is a better population data set.
+
+```{r}
+population <- population[c("Country.Code", "Year", "Population")]
+death_causes <- death_causes %>% left_join(
+  population, by = c("Code" = "Country.Code", "Year")) %>%
+  filter(!is.na(Population))
+```
+
+## 3. GDP Data
+
+We then continue to join the GDP per capita data into the main data set
+
+```{r}
+GDP_capita <- read.csv("GDP.csv", skip = 4)
+GDP_capita <- GDP_capita %>% pivot_longer(
+    cols = starts_with("X"), 
+    names_to = "Year", 
+    names_prefix = "X", 
+    values_to = "GDP"
+  )
+
+GDP_capita$Year <- as.factor(GDP_capita$Year)
+GDP_capita$Country.Code <- as.factor(GDP_capita$Country.Code)
+
+# Checking rows in death_causes that are different from GDP_capita dataframe
+unmatched_codes_gdp <- setdiff(death_causes$Code, GDP_capita$Country.Code)
+unmatched_rows_gdp <- death_causes %>% filter(Code %in% unmatched_codes_gdp)
+cat("Number of unmatched rows:", nrow(unmatched_rows_gdp))
+```
+
+The number of entities in both data sets are match with each other.
+
+```{r}
+# Left join between death_causes and GDP_capita
+GDP_capita <- GDP_capita[c("Country.Code", "Year", "GDP")]
+death_causes <- death_causes %>% left_join( GDP_capita, by = c("Code" = "Country.Code", "Year"))
+tryCatch({death_causes <- death_causes %>% rename(GDP_capita = GDP)
+}, error = function(e) {cat("")})
+
+# Entities with missing GDP per capita values
+NA_rows <- death_causes[!complete.cases(death_causes$GDP_capita), ]
+missing_gdp <- NA_rows %>% group_by(Entity) %>% summarise(missing_year_count = n())
+missing_table <- missing_gdp[order(rank(as.numeric(missing_gdp$missing_year_count))), ]
+kable(missing_table, format = "html") %>% scroll_box(height = "490px")
+```
+
+```{r}
+sum(is.na(death_causes))
+```
+
+The data shows 172 rows without GDP per capita values, about 3% of 6000 observations. Those missing values will be filled with linear interpolation and nearest available values. Due to the low proportion it have in the data set, the prediction is expected to have high accuracy and will not negative the performance.
+
+```{r}
+# Fill missing GDP values using linear interpolation for each country
+library(zoo)
+# Apply linear interpolation to fill in missing GDP per capita values
+death_causes <- death_causes %>%
+  group_by(Entity) %>%
+  arrange(Year) %>%
+  mutate(GDP_capita = zoo::na.approx(GDP_capita, na.rm = FALSE)) %>%
+  ungroup()
+
+# If some GDP per capita values are still missing, fill with nearest available value (forward or backward fill)
+death_causes <- death_causes %>%
+  group_by(Entity) %>%
+  arrange(Year) %>%
+  mutate(GDP_capita = zoo::na.locf(GDP_capita, na.rm = FALSE, fromLast = FALSE)) %>%
+  mutate(GDP_capita = zoo::na.locf(GDP_capita, na.rm = FALSE, fromLast = TRUE)) %>%
+  ungroup()
+
+# Check for any remaining missing values
+sum(is.na(death_causes$GDP_capita))
+```
+
+In the data, North Korea do not has any GDP values to fill the GDP per capita values. Due to this nation's political background, its other data also may no correct, therefore, this nation's data will be exclude from the data set.
+
+```{r}
+# Drop all rows with missing GDP_capita values
+death_causes <- death_causes %>% filter(!is.na(GDP_capita))
+```
+
+We then normalize the data to a data set name data_capita that only contain deaths data, population and GDP without Entity, Year and Code for further analysis.
+
+```{r}
+data_capita <- death_causes %>%  mutate(across(Outdoor.air.pollution:Iron.deficiency, ~ .x / Population))
+data_capita$Allcauses <- data_capita$Allcauses/data_capita$Population
+data_capita <- data_capita %>%  select(where(is.numeric)) %>%  select(-Population)
+
+#GDP per capita to GDP total for death_causes
+death_causes$GDP <- death_causes$GDP_capita * death_causes$Population
+death_causes <- death_causes %>% select(-GDP_capita)
+```
+
+# III. Explonatory Data Analysis (EDA)
+
+## 1. Distribution Analysis
+
+We then look into the histogram of deaths in all causes per capita to analyse its distribution.
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+# Convert the dataset to long format
+data_long <- data_capita %>% pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Plot before normalization
+p1 <- ggplot(death_causes, aes(x = Allcauses)) +
+  geom_histogram(bins = 51, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Deaths in All Causes per Capita (Before Normalization)",
+       x = "Deaths Per Capita", 
+       y = "Frequency") +
+  geom_vline(aes(xintercept = mean(Allcauses, na.rm = TRUE), color = "Mean"), 
+             linetype = "dashed", linewidth = 1) +  # Dashed line for mean
+  geom_vline(aes(xintercept = median(Allcauses, na.rm = TRUE), color = "Median"), 
+             linetype = "dashed", linewidth = 1) +  # Dashed line for median
+  scale_color_manual(name = "", values = c(Mean = "red", Median = "green")) +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# Plot after normalization
+p2 <- ggplot(data_capita, aes(x = Allcauses)) +
+  geom_histogram(bins = 51, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Deaths in All Causes per Capita (After Normalization)",
+       x = "Normalized Deaths Per Capita", 
+       y = "Frequency") +
+  geom_vline(aes(xintercept = mean(Allcauses, na.rm = TRUE), color = "Mean"), 
+             linetype = "dashed", linewidth = 1) +  # Dashed line for mean
+  geom_vline(aes(xintercept = median(Allcauses, na.rm = TRUE), color = "Median"), 
+             linetype = "dashed", linewidth = 1) +  # Dashed line for median
+  scale_color_manual(name = "", values = c(Mean = "red", Median = "green")) +  
+  theme_minimal() +  
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+grid.arrange(p1, p2, ncol = 1)
+```
+
+While the histogram of the normalized data set shows extreme values have already been treated. This indicate the data has a right skewed distribution, showing the majority of nations have a low death rate. A further tranfomation will need to be conducted in modelling data preparation after labelling step.
+
+```{r}
+# Convert the dataset to long format
+data_long <- data_capita %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Calculate means for each variable
+means <- data_long %>%
+  group_by(Variable) %>%
+  summarise(Mean = mean(Value, na.rm = TRUE))
+
+# Plot faceted density plots with mean lines for each variable
+ggplot(data_long, aes(x = Value)) +
+  geom_density(fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(data = means, aes(xintercept = Mean), color = "red", linetype = "dashed", size = 0.8) +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(title = "Distributions of All Variables with Mean Lines",
+       x = "Value", 
+       y = "Density") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 6),
+        axis.text = element_blank(),
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+The histogram shows that the majority of variables have right-skewed skewed distribution. Therefore, a log transformation will be conducted except with the target variables since it will be labelled with a mean value. This also mean that most of that nation have lower morality rates that the average, which is reasonable with the real world senario.
+
+## 2. Correlation
+
+```{r}
+library(reshape2)
+correlation_matrix_all <- cor(data_capita, use = "complete.obs")
+melted_corr_all <- melt(correlation_matrix_all)
+ggplot(data = melted_corr_all, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile(color = "gray") +  # Add black borders between cells
+  scale_fill_gradient2(low = "blue", high = "green", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 6, hjust = 1), 
+        axis.text.y = element_text(size = 6)) +  
+  coord_fixed() +  ggtitle("Correlation Matrix of the Dataset")
+```
+
+The matrix shows multiple strong correlation zones, both in negative and positive relationships; this indicates the clustering model will have significant results from this data set. To have more information, the discussion about those relationships continues in the clustering part, where the clusters will be more clear. High correlations should also be considered a potential problem during the modelling process, and further analysis of Multi-collinearity will be conducted to select the most suitable methods.
+
+```{r}
+# The correlation matrix for all causes
+cor_matrix2 <- cor(data_capita, use = "complete.obs")
+
+# Correlations with Low.birth.weight
+cor_low_birth_weight_2 <- cor_matrix2["GDP_capita", ]  
+cor_df_2 <- data.frame(Variable = names(cor_low_birth_weight_2), Correlation = cor_low_birth_weight_2)
+cor_df_2 <- cor_df_2[cor_df_2$Variable != "GDP_capita", ]
+# Sort the variables by absolute correlation for better visualization
+cor_df_2 <- cor_df_2 %>% arrange(desc(abs(Correlation)))
+
+ggplot(cor_df_2, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient2(low = "red", high = "blue", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +  coord_flip() +  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold")
+  ) +  ggtitle("Correlations with GDP per capita")
+```
+
+This plot shows the correlations between GDP per capita and causes of death.
+
+-   Positive correlations (blue): Factors like low physical activity, low bone mineral density, smoking, and high body mass index are more prevalent with higher GDP per capita countries.
+
+-   Negative correlations (red): Factors like unsafe water sources, household air pollution, low birth weight, and child wasting are more prevalent with lower GDP per capita countries. This indicating they are associated with poorer, less developed nations.
+
+## 3. Target Variable Analysis
+
+### a. Relationship with GDP per Capita
+
+```{r}
+# Normal scale plot with custom axis titles
+plot1 <- ggplot(data_capita, aes(x = GDP_capita, y = Low.birth.weight)) +
+  geom_point(color = "blue", alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(
+    title = "GDP vs Low Birth Weight - per capita", 
+    x = "GDP per Capita", 
+    y = "Low Birth Weight per Capita"
+  ) + theme_minimal() + theme(
+    plot.title = element_text(size = 12, hjust = 0.5),
+    strip.text = element_text(size = 8)
+  )
+
+# Log-scaled plot with custom axis titles
+plot2 <- ggplot(data_capita %>% filter(GDP_capita > 0, Low.birth.weight > 0), aes(x = GDP_capita, y = Low.birth.weight)) +
+  geom_point(color = "blue", alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(
+    title = "Log-Scaled histogram", 
+    x = "Log10(GDP per Capita)", 
+    y = "Log10(Low Birth Weight per Capita)"
+  ) + 
+  theme_minimal() +  theme(
+    plot.title = element_text(size = 12, hjust = 0.5),
+    strip.text = element_text(size = 8)
+  ) + scale_x_log10() + scale_y_log10()
+
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+The normal scale plot shows no linear relationship between GDP per capita and deaths by low birth weight per capita. There is also a high concentration of data points at low GDP levels, where the incidence of deaths by low birth weight per capita is relatively high.
+
+The log-transformed plot shows a much clearer linear relationship between the log of GDP per capita and the log of low birth weight. This indicates that a a logarithmic relationship exists. Additionally, the death rate in low birth weight decreases as GDP per capita increases in log scale. This relationship matches with the distribution in the normal scale plot.
+
+This suggests that a log transformation in the model may create significant improvement; this conclusion must be tested in the following steps.
+
+### b. Correlation with Other Variables
+
+```{r}
+cor_matrix <- cor(data_capita, use = "complete.obs")
+cor_low_birth_weight <- cor_matrix["Low.birth.weight", ] 
+cor_df <- data.frame(Variable = names(cor_low_birth_weight), Correlation = cor_low_birth_weight)
+cor_df <- cor_df[cor_df$Variable != "Low.birth.weight", ]
+# Sort the variables by absolute correlation for better visualization
+cor_df <- cor_df %>% arrange(desc(abs(Correlation)))
+
+ggplot(cor_df, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient2(low = "red", high = "blue", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name = "Correlation") +
+  coord_flip() +  theme_minimal() + theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold")
+  ) +  ggtitle("Correlations with Low Birth Weight (per capita)")
+```
+
+The correlations plot shows that there are two groups of variables, a positive and negative correlation. The negative group can explain that most of the death causes are related to high-income nation attributes, like low physical activity, high fasting plasma glucose, and a diet high in sodium.
+
+Meanwhile, the positive group is related to low-income nations, such as iron deficiency, unsafe water sources, and vitamin A deficiency.
+
+While most of the negative correlations are low correlations (between -0.5 and 0), the positive opposite is mostly higher than 0.5, indicating a strong relationship between the death rate by low birth weight and the positive correlation group.
+
+# IV. Classification models
+
+## 1. Modelling's Data Preparation
+
+### a. Labelling and log tranformation
+
+Since classification is a supervised learning, the target variable Low.birth.weight will be labeled as "High" and "Low". This will be done by using the mean value of the Low.birth.weight variable as a threshold.
+
+```{r}
+#Labelling using mean
+#Remove Allcauses as unnecessary additional variable
+causes_labled <- data_capita %>% select(-Allcauses) 
+index <- mean(data_capita$Low.birth.weight, na.rm = TRUE)
+causes_labled$Low.birth.weight <- as.factor(ifelse(data_capita$Low.birth.weight >= index, "High", "Low"))
+summary(causes_labled$Low.birth.weight)
+```
+
+Low.birth.weight in labelled data has "High" as 34.5% (2060 observations) and "Low" as 65.5% (3910 observations). This means that "Low" is the highest frequent value. Therefore, the Null model will use observations that have a "Low" value for its training data set.
+
+This also indicates that the data set is imbalanced. Due to this imbalance, the model may become biased toward instances with 'Low' values in the target variable. This imbalance is a critical factor to consider during our modeling process. We will need to evaluate the model's performance carefully, focusing on metrics such as precision, recall, and F1-score. If the model performs poorly due to the imbalance, we may need to apply different techniques to mitigate bias.
+
+```{r}
+#Log tranformation the explonatory data
+numeric_features <- setdiff(names(data_capita), "Low.birth.weight")
+data_capita[numeric_features] <- lapply(data_capita[numeric_features], function(x) log10(x + 1)) 
+
+# Convert the dataset to long format
+data_long2 <- data_capita %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+# Calculate means for each variable
+means2 <- data_long2 %>%
+  group_by(Variable) %>%
+  summarise(Mean = mean(Value, na.rm = TRUE))
+
+# Plot faceted density plots with mean lines for each variable
+ggplot(data_long2, aes(x = Value)) +
+  geom_density(fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(data = means2, aes(xintercept = Mean), color = "red", linetype = "dashed", size = 0.8) +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(title = "Distributions of All Variables with Mean Lines",
+       x = "Value", 
+       y = "Density") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 6),
+        axis.text = element_blank(),
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+The log transformation did improve some variable' distributions, but it is not much. The model training will have to conduct with skewed data.
+
+### b. Detect Perfect Separation
+
+```{r}
+# Example of plotting GDP vs Low Birth Weight to check for separation
+mean_gdp <- mean(causes_labled$GDP_capita, na.rm = TRUE)
+
+ggplot(causes_labled, aes(y = GDP_capita, x = Low.birth.weight, color = Low.birth.weight)) +
+  geom_jitter(width = 0.1, height = 0.1) +
+  geom_hline(yintercept = mean_gdp, linetype = "dashed", color = "red") +  
+  labs(title = "Checking for Perfect Separation",
+       y = "GDP per Capita",
+       x = "Low Birth Weight per Capita Outcome") + 
+  theme_minimal() +
+ annotate("text", x = -Inf, y = mean_gdp, label = paste("Mean:", round(mean_gdp, 1)), 
+           hjust = -0.1, vjust = -0.5, color = "orange", size = 3)
+```
+
+High low-birth-weight outcomes are tightly clustered in countries with GDP per capita lower than the average, whereas such outcomes are rare in countries with higher GDP per capita.
+
+This means there is a clear separation between Higher and Lower than the average GDP per Capita categories in High Low Birth Weight Outcomes, indicating that GDP per Capita is a strong predictor of whether a country will have a high or low rate of low birth weight mortality.
+
+Specifically, nations with GDP per Capita lower than the average tend to have High Low Birth Weight mortality, while countries with higher GDP per Capita tend to be the opposite.
+
+This is strong evidence of perfect separation, meaning logistic regression is unsuitable for this data set as it will produce infinite or extremely large coefficient estimates, leading to instability in the model and low performance.
+
+The naive Bayesian model or KNN model would be a better solution. While the KNN model is resource intensive, Naive Bayesian is a better choice for the first try of modelling as it is lighter and faster and suits a high number of variable cases. However, it also needs an assumption of feature independence, which may negatively impact the performance of the model if it is False.
+
+### c. Detect Zero Variance Predictors
+
+```{r}
+library(caret)
+# Check for near-zero variance predictors
+nzv <- nearZeroVar(causes_labled)
+nzv_predictors <- names(causes_labled)[nzv]
+cat("Near-zero variance predictors:", length(nzv_predictors))
+```
+
+Since there are no near-zero variance predictors, no transformation needs to be conducted.
+
+### d. Detect Multi-collinearity
+
+```{r}
+#Using Logis model and Variance Inflation Factor (VIF) to check Multi-collinearity
+library(car)
+model <- glm(Low.birth.weight ~ ., data = causes_labled, family = binomial)
+# Calculate VIF values for the predictors
+vif_values <- vif(model)
+# Print the VIF values
+cat("Number of variables that have VIF higher than 5:", length(vif_values[vif_values > 5]))
+cat("Number of variables that have VIF higher than 10:", length(vif_values[vif_values > 10]))
+```
+
+-   There are 21 variables have moderate multi-collinearity (VIF \> 5)..
+
+-   There are 12 variables have high multi-collinearity (VIF \> 10).
+
+This again mean that linear models, such as logistic regression, is unsuitable for this data set.
+
+### e. Data Splitting
+
+The test and train data split will use the 80/20 ratio. Calibration will using 10 fold Cross Validation method.
+
+```{r}
+# Set a seed for reproducibility
+set.seed(161094)
+# Create the train-test split (80/20)
+train_index <- createDataPartition(causes_labled$Low.birth.weight, p = 0.8, list = FALSE)
+dTrain <- causes_labled[train_index, ]
+dTest <- causes_labled[-train_index, ]
+```
+
+# 2. Null model
+
+To analyse the performance, a custom function will be used.
+
+```{r warning=FALSE}
+library(pROC)
+
+# Performance test with Accuracy, CI, PValue, F1_Score, Kappa, AUC, McNemar_PValue, Precision, and Recall.
+Performance <- function(predicted_set, predicted_prob, true_set = dTest$Low.birth.weight, 
+                        Positive = "High", Negative = "Low") {
+  # Calculate Confusion Matrix
+  conf_matrix <- confusionMatrix(predicted_set, true_set)
+  
+  # Extract metrics from confusion matrix
+  accuracy <- conf_matrix$overall["Accuracy"]
+  accuracy_ci <- conf_matrix$overall[c("AccuracyLower", "AccuracyUpper")]
+  accuracy_pval <- conf_matrix$overall["AccuracyPValue"]
+  kappa <- conf_matrix$overall["Kappa"]
+  precision <- conf_matrix$byClass["Pos Pred Value"]  # Precision
+  recall <- conf_matrix$byClass["Sensitivity"]        # Recall
+  f1_score <- 2 * (precision * recall) / (precision + recall)  # F1 Score
+  
+  # AUC Calculation:
+  roc_obj <- roc(true_set, predicted_prob, levels = c(Negative, Positive))
+  auc_value <- auc(roc_obj)
+  
+  # McNemar's Test Calculation
+  mcnemar_test <- mcnemar.test(table(true_set, predicted_set))
+  mcnemar_pval <- mcnemar_test$p.value
+  
+  # Return the results as a list, including Precision and Recall
+  result <- list(
+    Accuracy = accuracy,
+    Accuracy_CI_Lower = accuracy_ci[1],
+    Accuracy_CI_Upper = accuracy_ci[2],
+    Accuracy_PValue = accuracy_pval,
+    F1_Score = f1_score,
+    Precision = precision,
+    Recall = recall,
+    Kappa = kappa,
+    AUC = auc_value,
+    McNemar_PValue = mcnemar_pval
+  )
+return(result)
+}
+```
+
+As "Low" value in Low.birth.weight is the majority category, it can used to create a low performance model as Null model.
+
+```{r message=FALSE, warning=FALSE}
+# Print confusion matrix and performance metrics
+null_model_prediction <- as.factor(rep("Low", nrow(dTest)))
+conf_matrix <- confusionMatrix(null_model_prediction, dTest$Low.birth.weight)
+print(conf_matrix)
+```
+
+The accuracy of the model on test data set is 65%, and the AUC is 0.5, meaning it is a Null model as the model is equivalent to random guessing.
+
+# 3. Decision Tree Model
+
+## a. Single Variable Model
+
+The model will be trainned with 10-fold cross-validation and the single variable will be GDP per capita.
+
+```{r message=FALSE, warning=FALSE}
+library(rpart.plot)
+# Train model with 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+model_dtree_1 <- train(Low.birth.weight ~ GDP_capita,  
+                        data = dTrain,  
+                        method = "rpart",  
+                        trControl = train_control,  
+                        tuneLength = 10)
+#Plotting Decision Tree
+rpart.plot(model_dtree_1$finalModel)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Performance check with train set
+predicted_dtree_1 <- predict(model_dtree_1$finalModel, newdata = dTest, type = "class")
+prob_dtree_1 <- predict(model_dtree_1$finalModel, newdata = dTest, type = "prob")[, "High"]
+performance_dtree_1 <- Performance(predicted_dtree_1, prob_dtree_1)
+print.summaryDefault(performance_dtree_1 )
+```
+
+The model performs well overall, with an accuracy of 86.2% and 95% CI : (0.84, 0.88), significantly higher than the no-information rate (65.5%), supported by a P-value \< 3.878e-59, showing that the accuracy is not due to random chance.
+
+-   Precision = 0.7813 and Recall = 0.8325 are not an excellent performance but still a good values.
+
+-   F1 Score: 0.8 is a good balance between precision and recall. Moreover, the other index also showed a good performance, around 0.8. AUC is 0.85, which also shows that this is a good model.
+
+-   The Kappa statistic of 0.7 indicates a substantial agreement; however, it still does not meet the expectations of this project.
+
+-   Meanwhile, McNemar's test P = 0.043 is below the 0.05 threshold, indicating a significant imbalance in classification errors. This suggests the model might be biased toward one class.
+
+## b. Multiple Variables Model
+
+```{r}
+# Set up 10-fold cross-validation
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 10)  # 10-fold cross-validation
+
+# Perform RFE to select features
+rfe_result_rfe <- rfe(dTrain[, -which(names(dTrain) == "Low.birth.weight")], 
+                  dTrain$Low.birth.weight, 
+                  sizes = c(1:10), 
+                  rfeControl = control)
+```
+
+```{r}
+# Plot RFE results
+plot(rfe_result_rfe, type = c("g", "o"))
+rfe_result_rfe$results
+```
+
+The plot showing that k = 28 is the best k. However, k from 6 to 10 also shows a good performance with insignificance gap. As k = 10 giving a balance betweem performance and the risk of overfitting due to complex model with high k, the model will continue to be train using that k to reduce the compute
+
+```{r}
+# Select the best features based on RFE results
+selected_features_rfe <- predictors(rfe_result_rfe)[1:10]
+selected_features_rfe
+# Create the formula using the selected features
+formula_rfe <- as.formula(paste("Low.birth.weight ~", paste(selected_features_rfe, collapse = " + ")))
+
+# Train the decision tree model with 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+model_dtree_2 <- train(formula_rfe, 
+                         data = dTrain,  
+                         method = "rpart",  
+                         trControl = train_control,  
+                         tuneLength = 10)  # Try 10 different values for the complexity parameter (cp)
+#Decision Tree model plotting
+rpart.plot(model_dtree_2$finalModel)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Performance check with train set for Decision Tree Model 2
+predicted_dtree_2 <- predict(model_dtree_2$finalModel, newdata = dTest, type = "class")
+prob_dtree_2 <- predict(model_dtree_2$finalModel, newdata = dTest, type = "prob")[, "High"]
+performance_dtree_2 <- Performance(predicted_dtree_2, prob_dtree_2)
+print.summaryDefault(performance_dtree_2)
+```
+
+The model performs outstanding overall, with an accuracy of 96.4% and a 95% CI (95.18%, 97.38%), significantly higher than the no-information rate, supported by a P-value of 6.425e-153, showing that the accuracy is not due to random chance.
+
+-   Precision = 0.94 and Recall = 0.95 demonstrate excellent performance.
+
+-   The F1 Score of 0.9471 is an exceptional balance between precision and recall. Moreover, the other indices also show excellent performance, around 0.94. The AUC of 0.98 further confirms that this is an outstanding model.
+
+-   The Kappa statistic of 0.9188 indicates a high level of agreement, meeting the expectations of this project.
+
+-   Meanwhile, McNemar’s test P-value = 0.54 is higher than the 0.05 threshold, indicating no significant imbalance in classification errors.
+
+# 4. Naive Bayes Model
+
+## a. Single Variable Model
+
+```{r message=FALSE, warning=FALSE}
+library(naivebayes)
+# Set up train control for 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+model_bayes_1 <- train(Low.birth.weight ~ GDP_capita,
+                       data = dTrain,
+                       method = "naive_bayes",
+                       tuneLength = 99)
+```
+
+```{r message=FALSE, warning=FALSE}
+#Performance check with train set for Bayes Model 1
+predicted_bayes_1 <- predict(model_bayes_1$finalModel, newdata = dTest, type = "class")
+prob_bayes_1 <- predict(model_bayes_1$finalModel, newdata = dTest, type = "prob")[, "High"]
+performance_bayes_1 <- Performance(predicted_bayes_1, prob_bayes_1)
+print.summaryDefault(performance_bayes_1)
+```
+
+The model performs well overall, with an accuracy of 85.59% and 95% CI: (83.47%, 87.54%), significantly higher than the no-information rate (65.49%), supported by a P-value of 1.358e-55, showing that the accuracy is not due to random chance.
+
+-   Precision = 0.762 and Recall = 0.8471 are not an excellent performance but still a good values.
+
+-   F1 Score: 0.8023 is a good balance between precision and recall. Moreover, the other index also showed a good performance, around 0.8. AUC is 0.9239, which also shows that this is a good model.
+
+-   The Kappa statistic of 0.6895 indicates a substantial agreement; however, it still does not meet the expectations of this project.
+
+-   McNemar’s test P-value = 0.0006 is below the 0.05 threshold, indicating a significant imbalance in classification errors. This suggests the model might be biased toward one class.
+
+```{r message=FALSE, warning=FALSE}
+#LIME Function set up
+#(Benesty 2022)
+# LIME Function setup
+library(lime)
+apply_lime <- function(train_data, test_data, model, target_variable) {
+  # Remove the target variable column when creating the explainer
+  explainer <- lime(train_data[, -which(names(train_data) == as.character(target_variable))], as_classifier(model))
+  
+  # Select the first 6 instances to explain from the test data
+  instances_to_explain <- test_data[1:6, -which(names(test_data) == as.character(target_variable))]
+  
+  # Generate explanations for 1 label using 5 features
+  explanation <- explain(instances_to_explain, explainer, n_labels = 1, n_features = 5)
+  
+  # Plot the explanations
+  plot_features(explanation) + 
+    theme(
+      legend.text = element_text(size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      axis.text = element_text(size = 5),
+      axis.title = element_text(size = 5),
+      strip.text = element_text(size = 4)
+    )
+}
+```
+
+```{r warning=FALSE}
+#LIME
+apply_lime(dTrain, dTest, model_bayes_1, "Low.birth.weight")
+```
+
+-   Explanation fit up to 0.6 in Case 1 and 6 means that the local model of LIME is able to explain a moderate portion of the original model's behavior around these specific instances. While the fit isn't perfect, it's strong enough to provide a fairly reliable interpretation.
+
+-   In Case 3, 4, and 5, the lower explanation fit (around 0.3) suggests that the local model has more difficulty approximating the behavior of the original model. The LIME explanation is less reliable in these cases since it only captures about 30% of the original model’s decision-making process.
+
+-   However, despite the low explanation fit, the probability of the predictions in LIME plot are high for all cases. This means that the original model is confident in its predictions and local model can't fully capture the complexity of how the original model made those decisions.
+
+## b. Multiple Variable Model
+
+```{r}
+# Set up train control for 10-fold cross-validation
+control <- rfeControl(functions = nbFuncs, method = "cv", number = 10)
+# Perform RFE to select features
+rfe_result_2_rfe <- rfe(dTrain[, -which(names(dTrain) == "Low.birth.weight")], 
+                  dTrain$Low.birth.weight, 
+                  sizes = c(1:10), 
+                  rfeControl = control)
+```
+
+```{r}
+# Plot RFE results
+plot(rfe_result_2_rfe, type = c("g", "o"))
+rfe_result_2_rfe$results
+```
+
+The plot shows that k = 1 is the best k with low accuracy SD and high accuracy. As k = 6 and k = 9 are almost similar in performance, k = 6 will be selected as a balance option. We will check what features in each cases for a conclusion.
+
+```{r}
+library(caret)
+# Define control using Naive Bayes-specific functions
+control <- rfeControl(functions = nbFuncs, method = "cv", number = 10) # 10-fold cross-validation
+# Perform RFE for k = 1
+rfe_result_1 <- rfe(dTrain[, -which(names(dTrain) == "Low.birth.weight")], 
+                  dTrain$Low.birth.weight, 
+                  sizes = 1, # number of variables
+                  rfeControl = control)
+selected_features_1 <- predictors(rfe_result_1)
+# Perform RFE for k = 6
+rfe_result_6 <- rfe(dTrain[, -which(names(dTrain) == "Low.birth.weight")], 
+                  dTrain$Low.birth.weight, 
+                  sizes = 6, # number of variables
+                  rfeControl = control)
+selected_features_6 <- predictors(rfe_result_6)
+# Perform RFE for k = 9
+rfe_result_9 <- rfe(dTrain[, -which(names(dTrain) == "Low.birth.weight")], 
+                  dTrain$Low.birth.weight, 
+                  sizes = 9, # number of variables
+                  rfeControl = control)
+selected_features_9 <- predictors(rfe_result_9)
+
+cat("Selected features for k = 1:", selected_features_1, "\n")
+cat("Selected features for k = 6:", selected_features_6, "\n")
+cat("Selected features for k = 9:", selected_features_9, "\n")
+```
+
+Even though  k = 1 is the best number of features, k = 6 can capture more information when the features spread to more groups of mortality causes and more balance than k = 9. Therefore, k= 6 will be selected for this model.
+
+```{r}
+selected_features_rfe <- selected_features_6
+# Combine selected features into a formula
+formula_rfe <- as.formula(paste("Low.birth.weight ~", paste(selected_features_rfe, collapse = " + ")))
+# Fit Naive Bayes model using the selected features
+model_bayes_2 <- naive_bayes(formula_rfe, data = dTrain)
+# Subset the test data to include only the selected features
+dTest_subset <- dTest[, selected_features_rfe, drop = FALSE]
+```
+
+```{r message=FALSE, warning=FALSE}
+#Performance check with train set for Bayes Model 2
+predicted_bayes_2 <- predict(model_bayes_2, newdata = dTest_subset, type = "class")
+prob_bayes_2 <- predict(model_bayes_2, newdata = dTest_subset, type = "prob")[, "High"]
+performance_bayes_2 <- Performance(predicted_bayes_2, prob_bayes_2)
+print.summaryDefault(performance_bayes_2)
+```
+
+The model performs outstanding overall, with an accuracy of 93.55% and a 95% CI (from 92.01% to 94.88%), significantly higher than the no-information rate, supported by a P-value of 7.182e-119, showing that the accuracy is not due to random chance.
+
+-   Precision = 0.9136 and Recall = 0.8981 are an excellent performance.
+
+-   The F1 Score of 0.9058 is an exceptional balance between precision and recall. The AUC of 0.9819 also shows that this is an excellent performance model.
+
+-   The Kappa statistic of 0.8567 indicates high agreement and reaching the expectations of this project. Meanwhile, McNemar's test P = 0.4941 is higher the 0.05 threshold indicates no significant imbalance in classification errors.
+
+```{r warning=FALSE}
+#LIME
+apply_lime(dTrain, dTest, model_bayes_2, "Low.birth.weight")
+```
+
+-   Explanation fit up to 0.32 in Case 1 and 0.36 in Case 6 indicates that the local model of LIME is able to explain a moderate portion of the original model's behavior for these specific instances. While the explanation fit isn't very high, it's strong enough to provide some level of reliable interpretation. The features like iron deficiency, child wasting, and unsafe sanitation contribute the most to the original model's predictions in these cases.
+
+-   In Case 3, 4, and 5, the lower explanation fit (around 0.07 to 0.09) suggests that the local model has more difficulty approximating the behavior of the original model. The LIME explanations for these cases are less reliable since they only capture a small portion of the original model’s decision-making process.
+
+-   However, despite the low explanation fits, the predicted probabilities in all cases are high, indicating that the original model is very confident in its predictions. This shows that while the LIME local model may not fully capture the complexity of the original model's decision-making, the original model itself remains certain in its output.
+
+# 5. Models Comparation
+
+```{r message=FALSE, warning=FALSE}
+library(ROCit)
+# ROC plot
+rocit_dtree_1 <- rocit(score = prob_dtree_1, class = dTest$Low.birth.weight, negref = "Low")
+rocit_dtree_2 <- rocit(score = prob_dtree_2, class = dTest$Low.birth.weight, negref = "Low")
+rocit_bayes_1 <- rocit(score = prob_bayes_1, class = dTest$Low.birth.weight, negref = "Low")
+rocit_bayes_2 <- rocit(score = prob_bayes_2, class = dTest$Low.birth.weight, negref = "Low")
+
+plot(rocit_dtree_1, col = c("blue", "gray"), main = "ROC Curves for Dtree and Bayes Models", lwd = 2, YIndex = F)
+
+lines(rocit_dtree_2$TPR ~ rocit_dtree_2$FPR, col = "green", lwd = 2)
+lines(rocit_bayes_1$TPR ~ rocit_bayes_1$FPR, col = "red", lwd = 2)
+lines(rocit_bayes_2$TPR ~ rocit_bayes_2$FPR, col = "purple", lwd = 2)
+
+# Add a legend
+legend("bottomright", 
+       legend = c("Dtree Model 1 (Single Variable)", 
+                  "Dtree Model 2 (Selected Features)", 
+                  "Bayes Model 1 (Single Variable)", 
+                  "Bayes Model 2 (Selected Features)"), 
+       col = c("blue", "green", "red", "purple"), 
+       lwd = 2)
+```
+
+The ROC curve shows the performance of four models:
+
+-   Bayes Model 2 (Selected Features) (purple) performs excellent, with the highest sensitivity and specificity across most thresholds.
+
+-   Decision Tree Model 2 (Selected Features) (green) performance is closely with Bayes Model 2, showing excellent AUC.
+
+-   Bayes Model 1 (Single Variable) (red) also performs well, but slightly worse than Bayes Model 2.
+
+-   Decision Tree Model 1 (Single Variable) (blue) performs the worst, with a lower sensitivity compared to the other models.
+
+```{r}
+# AUC values for each model
+# Combine the results into a data frame
+comparison_df <- data.frame(
+  Model = c("Dtree Model 1 (Single Variable)", 
+            "Dtree Model 2 (Selected Features)", 
+            "Bayes Model 1 (Single Variable)", 
+            "Bayes Model 2 (Selected Features)"),
+  
+  Accuracy = c(performance_dtree_1$Accuracy, 
+               performance_dtree_2$Accuracy, 
+               performance_bayes_1$Accuracy, 
+               performance_bayes_2$Accuracy),
+  
+  Precision = c(performance_dtree_1$Precision, 
+                performance_dtree_2$Precision, 
+                performance_bayes_1$Precision, 
+                performance_bayes_2$Precision),
+  
+  Recall = c(performance_dtree_1$Recall, 
+             performance_dtree_2$Recall, 
+             performance_bayes_1$Recall, 
+             performance_bayes_2$Recall),
+  
+  F1_Score = c(performance_dtree_1$F1_Score, 
+               performance_dtree_2$F1_Score, 
+               performance_bayes_1$F1_Score, 
+               performance_bayes_2$F1_Score),
+  
+  Kappa = c(performance_dtree_1$Kappa, 
+            performance_dtree_2$Kappa, 
+            performance_bayes_1$Kappa, 
+            performance_bayes_2$Kappa),
+  
+  AUC = c(performance_dtree_1$AUC, 
+          performance_dtree_2$AUC, 
+          performance_bayes_1$AUC, 
+          performance_bayes_2$AUC),
+  
+  McNemar_PValue = c(performance_dtree_1$McNemar_PValue, 
+                     performance_dtree_2$McNemar_PValue, 
+                     performance_bayes_1$McNemar_PValue, 
+                     performance_bayes_2$McNemar_PValue)
+)
+
+# Sort the dataframe by AUC in descending order
+sorted_comparison_df <- comparison_df[order(-comparison_df$AUC), ]
+# Convert the P-values to scientific notation
+sorted_comparison_df$McNemar_PValue <- formatC(sorted_comparison_df$McNemar_PValue, format = "e", digits = 2)
+# Print the sorted comparison table
+kable(sorted_comparison_df, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>%
+  column_spec(c(1:8), extra_css = "white-space: nowrap;", border_right = TRUE) %>% 
+  scroll_box(height = "250px")
+```
+
+The table shows that Bayes Model 2 (Selected Features) and Decision Tree Model 2 (Selected Features) are the most excellent performance models, and their performance is very close. However, Bayes Model 2 (Selected Features) still has the highest AUC among other.
+
+# V. Clustering
+
+**The selection of methodology:**
+
+-   Hierarchical Clustering: This analysis is based on its effectiveness in handling numerical, continuous data, which K Means performs poorly. K Means also not suitable with data sets that have high number of outliers.
+
+-   Ward.D2: The data is numerical and continuous when variance minimization is essential. Although significant outliers might influence the Clustering since Ward’s method relies on minimizing variance, as normalization has already been conducted, this will minimize the impact.
+
+-   Euclidean Distance: Good for continuous, raw data and widely used for this type of case.
+
+To conduct Clustering using Hierarchical Clustering, the data will be scaled.
+
+```{r}
+# Prepare the data:
+data_clustering <- death_causes %>% select(-Allcauses,-GDP, -Entity, -Code, -Year, -Population)
+data_clustering <- t(data_clustering)  # Transpose the data
+scaled_df <- scale(data_clustering)  # Scale the data
+```
+
+```{r}
+# Perform hierarchical clustering on the rows (entities/countries)
+# Compute the distance matrix
+d <- dist(scaled_df, method = "euclidean")
+
+# Perform hierarchical clustering using Ward's method
+pfit <- hclust(d, method = "ward.D2")
+
+# Plot the dendrogram without grouping the clusters
+par(cex = 0.7)
+plot(pfit, labels=names(data_clustering), main="Cluster Dendrogram")
+```
+
+**The methods to select best k value:**
+
+-   The Calinski-Harabasz (CH) Index: It will evaluate the quality of clustering and measures the ratio of between-cluster dispersion to within-cluster dispersion. A higher CH Index indicates well-separated clusters with compact members.
+
+-   Within-Cluster Sum of Squares (WSS) - Elbow Method: it can determine the optimal number of clusters by evaluating the decrease in WSS when the number of clusters increases.
+
+```{r}
+# The squared Euclidean distance of two given points x and y
+sqr_euDist <- function(x, y) {
+  sum((x - y)^2)  
+}
+# WSS of a cluster
+wss <- function(clustermat) {
+  c0 <- colMeans(clustermat)
+  sum(apply(clustermat, 1, FUN = function(row) {sqr_euDist(row, c0)}))
+}
+# The total WSS. 
+wss_total <- function(scaled_df, labels) {
+  wss.sum <- 0
+  k <- length(unique(labels))
+  for (i in 1:k) {
+    wss.sum <- wss.sum + wss(subset(scaled_df, labels == i))
+  }
+  wss.sum
+}
+# The total sum of squares (TSS)
+tss <- function(scaled_df) {
+  wss(scaled_df)
+}
+# The CH index
+CH_index <- function(scaled_df, kmax, method = "kmeans") {
+  if (!(method %in% c("kmeans", "hclust")))
+    stop("method must be one of c('kmeans', 'hclust')")
+  
+  npts <- nrow(scaled_df)
+  wss.value <- numeric(kmax)  # Create a vector to store WSS values
+  wss.value[1] <- wss(scaled_df)  # WSS for k=1 (one large cluster)
+  
+  if (method == "kmeans") {
+    # kmeans clustering
+    for (k in 2:kmax) {
+      clustering <- kmeans(scaled_df, centers = k, nstart = 10, iter.max = 100)
+      wss.value[k] <- clustering$tot.withinss
+    }
+  } else {
+    # Hierarchical clustering
+    d <- dist(scaled_df, method = "euclidean")
+    pfit <- hclust(d, method = "ward.D2")
+    for (k in 2:kmax) {
+      labels <- cutree(pfit, k = k)
+      wss.value[k] <- wss_total(scaled_df, labels)
+    }
+  }
+  bss.value <- tss(scaled_df) - wss.value  # Between sum of squares (BSS)
+  B <- bss.value / (0:(kmax - 1))  # Between-group variance (B)
+  W <- wss.value / (npts - 1:kmax)  # Within-group variance (W)
+
+  data.frame(k = 1:kmax, CH_index = B / W, WSS = wss.value)
+}
+# The CH criterion
+crit.df <- CH_index(scaled_df, 10, method = "hclust")
+# Plot the CH and WSS plot
+fig1 <- ggplot(crit.df, aes(x = k, y = CH_index)) +
+  geom_point(na.rm = TRUE) + geom_line(colour = "red",na.rm = TRUE) +
+  scale_x_continuous(breaks = 1:10, labels = 1:10) + theme_minimal() +
+  labs(y = "CH index") + theme(text = element_text(size = 12))
+fig2 <- ggplot(crit.df, aes(x = k, y = WSS)) +
+  geom_point(na.rm = TRUE) + geom_line(colour = "blue",na.rm = TRUE) +
+  scale_x_continuous(breaks = 1:10, labels = 1:10) + theme_minimal() +
+  theme(text = element_text(size = 12))
+grid.arrange(fig1, fig2, nrow = 1)
+```
+
+The plots showing the optimal k is 3. To ensure this k is optimal, bootstrap re-sampling will be used to evaluate the clusters with k = 5 and then k = 3 to analyse how stable the clusters is.
+
+```{r}
+library(fpc)
+kbest.p <- 5
+invisible(capture.output({
+  cboot.hclust <- clusterboot(scaled_df, clustermethod = hclustCBI, method = "ward.D2", k = kbest.p)
+}))
+summary(cboot.hclust$result)
+```
+
+```{r}
+# cboot.hclust$bootbrd = number of times a cluster is desolved.
+(values <- 1 - cboot.hclust$bootbrd/100)
+```
+
+Using k=5, there are 3 clusters that have stabilization probilities around and higher than 80%.
+
+```{r}
+kbest.p <- 3
+invisible(capture.output({
+  cboot.hclust <- clusterboot(scaled_df, clustermethod = hclustCBI, method = "ward.D2", k = kbest.p)
+}))
+summary(cboot.hclust$result)
+```
+
+```{r}
+# cboot.hclust$bootbrd = number of times a cluster is desolved.
+(values <- 1 - cboot.hclust$bootbrd/100)
+```
+
+So best k is 3 with noise was detected, mean there are some points in the dataset were classified as noise or outliers.
+
+```{r}
+library(grDevices)
+# Best k
+groups <- cutree(pfit, k = 3)
+# Perform PCA on the scaled transposed data to calculate the principal components
+princ <- prcomp(scaled_df)  # Perform PCA on the transposed and scaled data
+nComp <- 2  # Focus on the first two principal components
+# Project the scaled data onto the first 2 principal components to form a new 2-column data frame
+project2D <- as.data.frame(predict(princ, newdata = scaled_df)[, 1:nComp])
+Variable <- row.names(scaled_df)  # Use column names as identifiers
+# Combine the projection, clusters, and variable names into one data frame
+hclust.project2D <- cbind(project2D, cluster = as.factor(groups), Variable = Variable)
+# Finding the convex hull for each cluster
+find_convex_hull <- function(proj2Ddf, groups) { do.call(rbind,
+  lapply(unique(groups),
+   FUN = function(c) {
+     f <- subset(proj2Ddf, cluster == c)  # Subset the data for each cluster
+     f[chull(f$PC1, f$PC2), ] }))} # Apply convex hull on PC1 and PC2
+# Calculate the convex hull for each cluster
+hclust.hull <- find_convex_hull(hclust.project2D, groups)
+# Plotting 2D clusters map
+ggplot(hclust.project2D, aes(x = PC1, y = PC2)) +
+  geom_point(aes(shape = cluster, color = cluster)) +
+  geom_text(aes(label = Variable, color = cluster), hjust = 0, vjust = 1, size = 3) +
+  geom_polygon(data = hclust.hull, aes(group = cluster, fill = as.factor(cluster)),
+               alpha = 0.4, linetype = 0) + 
+  theme(text = element_text(size = 12))
+```
+
+The 2D clusters map show clear clusters showing that the clustering has high performance with k = 3.
+
+```{r}
+par(cex = 0.55)
+# Plot the dendrogram
+plot(pfit, labels=names(data_clustering), main="Cluster Dendrogram")
+rect.hclust(pfit, k=3, border = "blue",) 
+```
+
+```{r}
+# List of clustering with optimal k
+groups <- sort(cutree(pfit, k = 3))
+
+# Print group by group
+for (i in unique(groups)) {
+  cat("Group", i, ":\n")
+  print(names(groups[groups == i]))  # Print the names of members in each group
+  cat("\n")
+}
+```
+
+**Cluster interpretation:**
+
+**Group 1:**
+
+-   In this group, there is a sub-group of causes that are related to the choice of diet, such as low intake of grains, fruits, vegetables, nuts, and high sodium intake.
+
+-   Another sub-group of causes is related to lifestyle habits such as alcohol and drug use, along with Low physical activity. Discontinued breastfeeding and Non-exclusive breastfeeding are also related to this group.
+
+-   In conclusion, this group could be the cause of death that is related to lifestyle selections and high-income countries, as already found in the correlation plot.
+
+**Group 2:**
+
+-   This group contain Smoking, High systolic blood pressure, High fasting plasma glucose and High body mass index, which are highly related to each other. Therefore, this can be a group of cardiovascular problems.
+
+**Group 3:**
+
+-   This group contains elements related to environmental health risks such as unsafe water sources, household air pollution, unsafe sanitation, and lack of access to handwashing facilities.
+
+-   Furthermore, child health-related causes such as low birth weight, child wasting, and unsafe sex are also clustered here.
+
+-   In conclusion, this group is highly related to low-income and developed countries.
+
+# VI. Reference
+
+-   OpenAI, "GPT-4" accessed via web application interface for code suggestion and samples, Oct. 2024. [Online]. Available: <https://chat.openai.com>
+
+-   Benesty, TLP& M 2022, Understanding lime. Available from: <https://cran.r-project.org/web/packages/lime/vignettes/Understanding_lime.html>.
+
+-   Painuli, D, Bhardwaj, S, Kose, U, Gurukula Kangri Vishwavidyalaya, & Suleyman Demirel University 2023, “Optimized Speech Signal-based Diagnosis of Parkinson’s Disease using Machine Learning Techniques – Augmented by An Efficient Feature Selection & Hyperparameter Tuning Approach,” Unknown, p. 9523. Available from: <https://mir-net.com/pdf/9523.pdf>.
+
+-   Mladenova, T, Valova, I, Evstatiev, B, Valov, N, Varlyakov, I, Markov, T, Stoycheva, S, Mondeshka, L, & Markov, N 2024, “Evaluation of the efficiency of machine learning algorithms for identification of cattle behavior using accelerometer and gyroscope data,” AgriEngineering, vol. 6, no. 3, pp. 2179–2197. Available from: <https://www.mdpi.com/2624-7402/6/3/128>.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+save.image(file = "app.RData")
+```
